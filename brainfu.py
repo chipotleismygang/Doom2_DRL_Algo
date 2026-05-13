@@ -2,33 +2,25 @@
 This is a deep RL algorithm,
 '''
 
+import os
+import random
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from collections import deque
+from tqdm import trange
+import vizdoom as vzd
 
-
-
-
-# --- 0. THE BULLSHIT ---
-# i now know what this does but it works and im still scared to touch it
-import os#Handles file paths (so the AI can find the doom2.wad file).
-import random#Used for the "Exploration" phase where the AI just mashes random buttons to see what happens.
-import numpy as np#Handles the math for the images (converting screen pixels into numbers).
-import torch #It handles all the complex calculus of the "brain."
-import torch.nn as nn#"Neural Network" tools—like building blocks for the brain.
-import torch.optim as optim#The "Teacher" math that updates the brain when it makes a mistake.
-from collections import deque#A list that automatically deletes old memories so your RAM doesn't fill up.
-from tqdm import trange#Creates the fancy progress bar while training. that i stole from the internet
-import vizdoom as vzd#The bridge that lets Python control the actual Doom game engine. and if i wanted. play a pirated version of doom
-
-# --- 1. THE BRAIN BOX ---
-class DuelQNet(nn.Module):#Tells Python this class is a neural network.
+class DuelQNet(nn.Module):
     def __init__(self, in_channels, num_actions):
         super(DuelQNet, self).__init__()
         
-        def conv_block(in_f, out_f):#A "Helper" function. It builds a "scanner" that looks for shapes (monsters, walls) 
+        def conv_block(in_f, out_f):
             return nn.Sequential(
-                nn.Conv2d(in_f, out_f, kernel_size=3, stride=2, padding=1, bias=False),#The "Scanner." It slides a filter over the image to find edges and patterns.
-                nn.BatchNorm2d(out_f),#Standardizes the data so the brain doesn't get overwhelmed by sudden flashes of light or dark. we dont want the brain to have epilepsy
-
-                nn.ReLU()#The "Filter." It kills off useless negative numbers and keeps the useful positive signals. this was a problem with old perceptrons and old machine learning algorithms
+                nn.Conv2d(in_f, out_f, kernel_size=3, stride=2, padding=1, bias=False),
+                nn.BatchNorm2d(out_f),
+                nn.ReLU()
             )
 
         self.conv1 = conv_block(1, 8) 
@@ -36,17 +28,15 @@ class DuelQNet(nn.Module):#Tells Python this class is a neural network.
         self.conv3 = conv_block(8, 8)
         self.conv4 = conv_block(8, 16)
         
-        
-        self.adaptive_pool = nn.AdaptiveAvgPool2d((3, 2)) #orces any screen size into a tiny 3 by 2 grid so the brain's "Decision Center" always sees the same amount of data.
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((3, 2))
 
-        self.state_fc = nn.Sequential(#On one part of the brain. It calculates: "How good is my current situation?"
-
+        self.state_fc = nn.Sequential(
             nn.Linear(96, 64), 
             nn.ReLU(),
             nn.Linear(64, 1)
         )
         
-        self.advantage_fc = nn.Sequential(#The other half. It calculates: "How much better is this than that?"
+        self.advantage_fc = nn.Sequential(
             nn.Linear(96, 64),
             nn.ReLU(),
             nn.Linear(64, 8) 
@@ -64,21 +54,18 @@ class DuelQNet(nn.Module):#Tells Python this class is a neural network.
         advantage = self.advantage_fc(x)
         return state_value + (advantage - advantage.mean(dim=1, keepdim=True))
 
-# Security allowlist for PyTorch 2.6+ because for some reason it just completely breaks without it??? (also idk what it means. reddit said do this and yay)
 torch.serialization.add_safe_globals([DuelQNet])
 
-# --- 2. THE AGENT ---
 class Agent:
-    def __init__(self, n_actions, model_path="model-doom.pth"): # you can make new memories by changing every instance of this file name with another one.
+    def __init__(self, n_actions, model_path="model-doom.pth"):
         self.n_actions = n_actions
         self.model_path = model_path
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu") #if i want to train it on my home computer i can use CUDA. idk what it actually is but its good. i think.
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Active Device: {self.device}")
         
         self.policy_net = DuelQNet(1, 8).to(self.device)
         self.target_net = DuelQNet(1, 8).to(self.device)
-        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=1e-4) #<-----no clue what most of that means but lr=1e-4 is the Learning Rate. 0.0001. It's how much the AI "changes its mind" every time it learns something.
-        #the crap the algorithm actually gets effected by
+        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=1e-4)
         self.memory = deque(maxlen=20000)
         self.batch_size = 64
         self.gamma = 0.99
@@ -86,6 +73,7 @@ class Agent:
         self.eps_decay = 0.9995
         self.eps_min = 0.01
         self.train_step = 0
+        self.episode_rewards = []
 
         self.load_model()
         self.target_net.load_state_dict(self.policy_net.state_dict())
@@ -94,17 +82,17 @@ class Agent:
         if os.path.exists(self.model_path):
             print(f"Loading {self.model_path}...") 
             checkpoint = torch.load(self.model_path, map_location=self.device, weights_only=False)
-            if isinstance(checkpoint, DuelQNet): #apparently DuelQNet and DQN cant both be used without it breaking even though its THE SAME SHIT
+            if isinstance(checkpoint, DuelQNet):
                 self.policy_net.load_state_dict(checkpoint.state_dict())
             elif isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
                 self.policy_net.load_state_dict(checkpoint['model_state_dict'])
                 self.epsilon = checkpoint.get('epsilon', self.epsilon)
 
-    def save_model(self): #yay no amnesia between runs anymore
+    def save_model(self):
         checkpoint = {'model_state_dict': self.policy_net.state_dict(), 'epsilon': self.epsilon}
         torch.save(checkpoint, self.model_path) 
 
-    def RANDOM_BULLSHIT_GO(self, state): #RANDOM_BULLSHIT_GO should be renamed to something proper but thats boring so ill keep it for now
+    def select_action(self, state):
         screen = state.screen_buffer[np.newaxis, :, :] 
         if random.random() < self.epsilon:
             action_idx = random.randint(0, self.n_actions - 1)
@@ -118,8 +106,9 @@ class Agent:
         action[action_idx] = 1
         return action, action_idx, screen
 
-    def update_policy(self): #was the random bullshit good?
-        if len(self.memory) < self.batch_size: return
+    def update_policy(self):
+        if len(self.memory) < self.batch_size:
+            return
         batch = random.sample(self.memory, self.batch_size)
         s, a, r, sn, d = zip(*batch)
         s = torch.from_numpy(np.stack(s)).to(self.device)
@@ -136,36 +125,33 @@ class Agent:
         loss = nn.MSELoss()(q_values, expected_q)
         self.optimizer.zero_grad()
         loss.backward()
-        self.optimizer.step() #its learning oooh spooky scifi
+        self.optimizer.step()
         self.train_step += 1
-        if self.train_step % 1000 == 0:
+        if self.train_step % 1000 == 0 and self.train_step > 0:
             self.target_net.load_state_dict(self.policy_net.state_dict())
 
-# --- 3. THE GAME CLASS ---
 class Game():
     def __init__(self, config):
         self.game = vzd.DoomGame()
         self.game.set_doom_game_path(os.path.abspath(config["wad"]))
-        self.game.set_screen_resolution(vzd.ScreenResolution.RES_160X120) # Grayscale 
+        self.game.set_screen_resolution(vzd.ScreenResolution.RES_160X120)
         self.game.set_screen_format(vzd.ScreenFormat.GRAY8)
         self.game.set_render_hud(True)
         
-        # High Speed Settings to go HIGH SPEED (unpatched working 2026 cracked FREE DOWNLOAD)
-        self.game.set_window_visible(True) # HEY HEY ITS RIGHT HERE ITS SIMPLE AS SHIT MAKE IT SO I CAN TOGGLE WINDOW VISIBILITY BETWEEEEENNNNN BECAUSE I WANT TO SEE THE algorithm PLAY AND SHOOT THE WAAAAAAAAAAALLLLLLLLLLLLLLLLLLLSSSSSSSSSSSSSS
+        self.game.set_window_visible(True)
         self.game.set_mode(vzd.Mode.PLAYER) 
-        self.game.set_ticrate(2100) # Uncap FPS because fast
+        self.game.set_ticrate(2100)
         self.game.set_available_game_variables([
-        vzd.GameVariable.POSITION_X,
-        vzd.GameVariable.POSITION_Y,
-        vzd.GameVariable.HEALTH,
-        vzd.GameVariable.ARMOR,
-        vzd.GameVariable.SELECTED_WEAPON_AMMO,
-        vzd.GameVariable.ITEMCOUNT,
-        vzd.GameVariable.SECRETCOUNT,
-        vzd.GameVariable.KILLCOUNT
+            vzd.GameVariable.POSITION_X,
+            vzd.GameVariable.POSITION_Y,
+            vzd.GameVariable.HEALTH,
+            vzd.GameVariable.ARMOR,
+            vzd.GameVariable.SELECTED_WEAPON_AMMO,
+            vzd.GameVariable.ITEMCOUNT,
+            vzd.GameVariable.SECRETCOUNT,
+            vzd.GameVariable.KILLCOUNT
         ])
 
-        #Schmovement
         self.game.add_available_button(vzd.Button.MOVE_FORWARD)
         self.game.add_available_button(vzd.Button.MOVE_BACKWARD)
         self.game.add_available_button(vzd.Button.MOVE_LEFT)
@@ -182,51 +168,50 @@ class Game():
         visited_tiles = set()
         tile_size = 64
         try:
-            for epoch in range(self.config["epochs"]): #an epoch is a generation but fancy name because yes. google dictionary thing says "An epoch represents one full pass of the entire training dataset through a machine learning model"
+            for epoch in range(self.config["epochs"]):
                 self.game.new_episode()
                 visited_tiles.clear()
-                last_health, last_armor, last_ammo, last_items, last_secrets, last_kills = 100, 0, 50, 0, 0, 0,
+                last_health, last_armor, last_ammo, last_items, last_secrets, last_kills = 100, 0, 50, 0, 0, 0
+                epoch_reward = 0
                 
-                #FIXED: Use a proper steps_per_epoch loop or explode and be bad at video games
                 for _ in trange(self.config["steps_per_epoch"], desc=f"Epoch {epoch+1}"):
                     if self.game.is_episode_finished():
                         self.game.new_episode()
 
                     state = self.game.get_state()
-                    #FIXED: Use continue instead of break to avoid stopping the epoch 
                     if state is None: 
                         continue
 
                     vars = state.game_variables
-                    # Removing the 9th variable (vars[8])
                     pos_x, pos_y, cur_health, cur_armor, cur_ammo, cur_items, cur_secrets, cur_kills = vars[0], vars[1], vars[2], vars[3], vars[4], vars[5], vars[6], vars[7]
 
-
                     pickup_reward = 0
-                    if cur_health > last_health: pickup_reward += 0.5 #Yay health!
-                    if cur_armor > last_armor:   pickup_reward += 0.5 #Yay armor!
-                    if cur_ammo > last_ammo:     pickup_reward += 0.3 #Yay ammo!
-                    if cur_items > last_items: pickup_reward += 0.5 #Yay Item!
-                    if cur_secrets > last_secrets: pickup_reward += 60 #Yay secret!
-                    if cur_kills > last_kills: pickup_reward += 1.2 #Yay murder!
+                    if cur_health > last_health: pickup_reward += 0.1
+                    if cur_armor > last_armor: pickup_reward += 0.1
+                    if cur_ammo > last_ammo: pickup_reward += 0.05
+                    if cur_items > last_items: pickup_reward += 0.1
+                    if cur_secrets > last_secrets: pickup_reward += 2.0
+                    if cur_kills > last_kills: pickup_reward += 0.3
 
-                    if cur_health < last_health: pickup_reward += -0.7 #Oh no my health!
-                    if cur_armor < last_armor: pickup_reward += -0.5 #Oh no my armor!
-                    if cur_ammo < last_ammo: pickup_reward += -0.1 #Oh no my ammo!
-                    if self.game.is_player_dead(): pickup_reward += -9999 #Oh no my life!
+                    if cur_health < last_health: pickup_reward -= 0.15
+                    if cur_armor < last_armor: pickup_reward -= 0.1
+                    if cur_ammo < last_ammo: pickup_reward -= 0.02
+                    if self.game.is_player_dead(): pickup_reward -= 1.0
                     
                     current_tile = (int(pos_x / tile_size), int(pos_y / tile_size))
                     last_health, last_armor, last_ammo = cur_health, cur_armor, cur_ammo
+                    last_items, last_secrets, last_kills = cur_items, cur_secrets, cur_kills
                     
                     discovery_reward = 0
                     if current_tile not in visited_tiles:
                         discovery_reward = 0.05 
                         visited_tiles.add(current_tile)
 
-                    action, action_idx, current_screen = agent.RANDOM_BULLSHIT_GO(state)
+                    action, action_idx, current_screen = agent.select_action(state)
                     nreward = self.game.make_action(action, self.config["frame_repeat"])
                     reward = nreward + discovery_reward + pickup_reward
-                    print(reward)
+                    reward = np.clip(reward, -1.0, 1.0)
+                    epoch_reward += reward
                     done = self.game.is_episode_finished()
 
                     next_screen = np.zeros_like(current_screen)
@@ -236,14 +221,16 @@ class Game():
 
                     agent.memory.append((current_screen, action_idx, reward, next_screen, done))
                     agent.update_policy()
-                    agent.epsilon = max(agent.eps_min, agent.epsilon * agent.eps_decay)
                 
-                agent.save_model() #saves every epock so even if it crashes it should still learn SOOOMMMMEEETHIIINNNG
-        finally: #sarcastic ass code syntax
-            self.game.close() #HMMM WONDER WHAT THIS DOES
+                agent.epsilon = max(agent.eps_min, agent.epsilon * agent.eps_decay)
+                agent.episode_rewards.append(epoch_reward)
+                print(f"Epoch {epoch+1}: Total Reward = {epoch_reward:.2f}, Epsilon = {agent.epsilon:.4f}")
+                agent.save_model()
+        finally:
+            self.game.close()
 
-if __name__ == "__main__": #this is the only stuff that isnt in definitions
-    config = {"wad": "doom2.wad", "epochs": 100, "steps_per_epoch": 2500, "frame_repeat": 4} #setting right at the end so easy to find could make a popup t change it each time but that might be annoying or break it
+if __name__ == "__main__":
+    config = {"wad": "doom2.wad", "epochs": 100, "steps_per_epoch": 2500, "frame_repeat": 4}
     agent = Agent(n_actions=8)
     my_game = Game(config)
     my_game.train(agent)
