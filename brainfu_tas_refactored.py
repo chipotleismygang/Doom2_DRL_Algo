@@ -24,7 +24,7 @@ import torch.nn as nn
 from collections import deque
 from typing import Dict, Tuple, Optional, Any
 import vizdoom as vzd
-from gym import Env, spaces
+from gymnasium import Env, spaces
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
@@ -151,7 +151,7 @@ class DoomTASEnv(Env):
         
         # Observation space: Screen + auxiliary data
         self.observation_space = spaces.Dict({
-            "screen": spaces.Box(low=0, high=255, shape=(1, 160, 120), dtype=np.uint8),
+            "screen": spaces.Box(low=0, high=255, shape=(1, 120, 160), dtype=np.uint8), # Changed from (1, 160, 120)
             "aux_data": spaces.Box(low=-np.inf, high=np.inf, shape=(8,), dtype=np.float32)
         })
         
@@ -171,7 +171,7 @@ class DoomTASEnv(Env):
         self.game.set_screen_format(vzd.ScreenFormat.GRAY8)
         
         # Asynchronous uncapped framerate mode
-        self.game.set_async_mode(True)
+        
         self.game.set_ticrate(0)  # 0 = uncapped
         
         self.game.set_render_hud(True)
@@ -189,7 +189,7 @@ class DoomTASEnv(Env):
             vzd.GameVariable.ANGLE,
             vzd.GameVariable.HEALTH,
             vzd.GameVariable.USER1,  # Custom var: distance to exit (if available)
-            vzd.GameVariable.GAMETIC,
+            
         ])
         
         # TAS Action buttons (18 total)
@@ -219,12 +219,48 @@ class DoomTASEnv(Env):
         self.game.init()
     
     def _get_state(self) -> Dict[str, np.ndarray]:
-        """Extract current game state into observation dict."""
+        """Extract current game state into observation dict with safety fallbacks."""
         state = self.game.get_state()
+    
+        # If state is None, return zeros immediately to avoid UnboundLocalError
         if state is None:
             return self._zero_observation()
-        
+    
+        # Extract screen buffer
         screen = state.screen_buffer[np.newaxis, :, :].astype(np.uint8)
+    
+        # Extract game variables safely
+        vars = state.game_variables
+    
+        # Use default 0.0 if variables are missing for some reason
+        pos_x = vars[0] if len(vars) > 0 else 0.0
+        pos_y = vars[1] if len(vars) > 1 else 0.0
+        pos_z = vars[2] if len(vars) > 2 else 0.0
+        vel_x = vars[3] if len(vars) > 3 else 0.0
+        vel_y = vars[4] if len(vars) > 4 else 0.0
+        vel_z = vars[5] if len(vars) > 5 else 0.0
+        angle = vars[6] if len(vars) > 6 else 0.0
+        health = vars[7] if len(vars) > 7 else 0.0
+    
+        # Manual tick calculation
+        game_tick = float(self.step_count * self.frame_skip)
+    
+        # Your distance logic (ensure this is tuned for your map!)
+        distance_to_exit = np.sqrt(pos_x**2 + pos_y**2) - 1000.0
+        distance_to_exit = max(0.0, float(distance_to_exit))
+    
+        aux_data = np.array([
+            pos_x, pos_y, vel_x, vel_y, angle, health, distance_to_exit, game_tick
+        ], dtype=np.float32)
+    
+        return {
+            "screen": screen,
+            "aux_data": aux_data
+        } 
+
+        aux_data = np.array([
+            pos_x, pos_y, vel_x, vel_y, angle, health, distance_to_exit, game_tick
+        ], dtype=np.float32)
         
         # Extract game variables
         vars = state.game_variables
@@ -351,16 +387,20 @@ class DoomTASEnv(Env):
         
         return reward
     
-    def reset(self):
-        """Reset environment for new episode."""
+    def reset(self, seed=None, options=None):
+        # Standard Gymnasium reset boilerplate
+        super().reset(seed=seed)
+    
         self.game.new_episode()
         self.prev_pos = np.array([0.0, 0.0, 0.0])
         self.prev_dist_to_exit = float('inf')
         self.prev_health = 100.0
         self.step_count = 0
-        
+    
         state = self._get_state()
-        self.episode_start_tick = state["aux_data"][7]
+        info = {} # You can add initial info here if needed
+    
+        return state, info
         
         return state
     
