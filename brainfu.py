@@ -28,18 +28,18 @@ class DuelQNet(nn.Module):
         self.conv3 = conv_block(8, 8)
         self.conv4 = conv_block(8, 16)
         
-        self.adaptive_pool = nn.AdaptiveAvgPool2d((3, 2))
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((4, 4))
 
         self.state_fc = nn.Sequential(
-            nn.Linear(96, 64), 
+            nn.Linear(256, 128), 
             nn.ReLU(),
-            nn.Linear(64, 1)
+            nn.Linear(128, 1)
         )
         
         self.advantage_fc = nn.Sequential(
-            nn.Linear(96, 64),
+            nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Linear(64, 8) 
+            nn.Linear(128, 8) 
         )
 
     def forward(self, x):
@@ -118,13 +118,16 @@ class Agent:
         d = torch.tensor(d, dtype=torch.float32, device=self.device)
 
         q_values = self.policy_net(s).gather(1, a.unsqueeze(1)).squeeze()
+        
         with torch.no_grad():
-            next_q = self.target_net(sn).max(1)[0]
+            next_actions = self.policy_net(sn).argmax(dim=1)
+            next_q = self.target_net(sn).gather(1, next_actions.unsqueeze(1)).squeeze()
             expected_q = r + (self.gamma * next_q * (1 - d))
 
         loss = nn.MSELoss()(q_values, expected_q)
         self.optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
         self.optimizer.step()
         self.train_step += 1
         if self.train_step % 1000 == 0 and self.train_step > 0:
