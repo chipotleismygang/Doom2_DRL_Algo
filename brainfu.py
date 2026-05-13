@@ -21,7 +21,6 @@ import torch.optim as optim
 from collections import deque
 from tqdm import trange
 import vizdoom as vzd
-import matplotlib.pyplot as plt
 
 
 class DuelQNet(nn.Module):
@@ -437,12 +436,6 @@ class Game:
         self.game.add_available_button(vzd.Button.USE)             # Use door/item
         
         self.config = config
-        
-        # Initialize plot tracking variables
-        self.step_rewards = []  # Track step-by-step rewards for current epoch
-        self.fig = None
-        self.ax1 = None
-        self.ax2 = None
 
     def train(self, agent):
         """
@@ -464,18 +457,12 @@ class Game:
         visited_tiles = set()
         tile_size = 64  # Size of each tile in game units (larger = fewer tiles)
         
-        # Initialize matplotlib for real-time visualization
-        plt.ion()  # Interactive mode - non-blocking plots
-        self.fig, (self.ax1, self.ax2) = plt.subplots(1, 2, figsize=(14, 5))
-        self.fig.suptitle("Doom RL Training: Real-Time Reward Visualization")
-        
         try:
             # Train for specified number of epochs (episodes)
             for epoch in range(self.config["epochs"]):
                 # Start a new episode (game instance)
                 self.game.new_episode()
                 visited_tiles.clear()  # Reset visited areas for new episode
-                self.step_rewards.clear()  # Clear step rewards for new epoch
                 
                 # Initialize previous game variables for reward computation
                 # We compare current vs. previous values to give differential rewards
@@ -489,7 +476,7 @@ class Game:
                 epoch_reward = 0  # Accumulate total reward for this episode
                 
                 # Run for specified number of steps per epoch
-                for step_num in trange(self.config["steps_per_epoch"], desc=f"Epoch {epoch+1}"):
+                for _ in trange(self.config["steps_per_epoch"], desc=f"Epoch {epoch+1}"):
                     # Check if episode ended (agent died or max steps reached)
                     if self.game.is_episode_finished():
                         self.game.new_episode()
@@ -569,7 +556,6 @@ class Game:
                     
                     # Accumulate reward for episode monitoring
                     epoch_reward += reward
-                    self.step_rewards.append(reward)  # Track individual step rewards
                     
                     # Check if episode ended
                     done = self.game.is_episode_finished()
@@ -586,19 +572,12 @@ class Game:
                     
                     # Train agent: Sample from replay buffer and update weights
                     agent.update_policy()
-                    
-                    # Update plots every 50 steps
-                    if (step_num + 1) % 50 == 0:
-                        self._update_plots(agent)
                 
                 # Decay exploration rate after each episode
                 agent.epsilon = max(agent.eps_min, agent.epsilon * agent.eps_decay)
                 
                 # Record total reward for this episode
                 agent.episode_rewards.append(epoch_reward)
-                
-                # Final plot update for this epoch
-                self._update_plots(agent)
                 
                 # Print progress information
                 print(f"Epoch {epoch+1}: Total Reward = {epoch_reward:.2f}, Epsilon = {agent.epsilon:.4f}")
@@ -609,37 +588,6 @@ class Game:
         finally:
             # Ensure game closes even if training is interrupted
             self.game.close()
-            plt.close(self.fig)  # Close the matplotlib window
-    
-    def _update_plots(self, agent):
-        """
-        Update the real-time reward visualization plots.
-        
-        Left plot: Last 200 step rewards (shows fine-grained reward signal)
-        Right plot: Episode total rewards (shows overall training progress)
-        """
-        self.ax1.clear()
-        self.ax1.plot(self.step_rewards[-200:], alpha=0.7, color='blue', linewidth=0.8)
-        self.ax1.set_title('Last 200 Step Rewards (Current Episode)', fontsize=12, fontweight='bold')
-        self.ax1.set_ylabel('Step Reward', fontsize=10)
-        self.ax1.set_xlabel('Step Number', fontsize=10)
-        self.ax1.grid(True, alpha=0.3)
-        self.ax1.axhline(y=0, color='k', linestyle='--', alpha=0.3)
-        
-        self.ax2.clear()
-        self.ax2.plot(agent.episode_rewards, alpha=0.7, color='green', linewidth=1.5)
-        self.ax2.set_title('Episode Total Rewards (Training Progress)', fontsize=12, fontweight='bold')
-        self.ax2.set_ylabel('Total Episode Reward', fontsize=10)
-        self.ax2.set_xlabel('Episode Number', fontsize=10)
-        self.ax2.grid(True, alpha=0.3)
-        
-        # Add current metrics to title
-        if len(agent.episode_rewards) > 0:
-            latest_reward = agent.episode_rewards[-1]
-            avg_reward = np.mean(agent.episode_rewards[-10:]) if len(agent.episode_rewards) >= 10 else np.mean(agent.episode_rewards)
-            self.fig.suptitle(f"Doom RL Training | Latest: {latest_reward:.2f} | Avg(10): {avg_reward:.2f} | Epsilon: {agent.epsilon:.4f}")
-        
-        plt.pause(0.001)  # Non-blocking pause to update display
 
 
 if __name__ == "__main__":
