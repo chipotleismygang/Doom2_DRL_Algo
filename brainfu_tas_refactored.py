@@ -70,7 +70,7 @@ class TASFeatureExtractor(BaseFeaturesExtractor):
             nn.Linear(1024 + 64, features_dim),
             nn.ReLU()
         )
-    
+        
     def forward(self, observations: Dict[str, torch.Tensor]) -> torch.Tensor:
         screen = observations["screen"].float() / 255.0
         aux_data = observations["aux_data"].float()
@@ -96,7 +96,7 @@ class DoomTASEnv(Env):
         super().__init__()
         self.game = vzd.DoomGame()
         self.config = config
-        self.frame_skip = 4
+        self.frame_skip = 1
         
         self._init_doom(render)
         
@@ -111,6 +111,7 @@ class DoomTASEnv(Env):
         
         self.prev_aux = np.zeros(8, dtype=np.float32)
         self.step_count = 0
+        self.was_stuck = False
         
     def _init_doom(self, render: bool):
         self.game.set_doom_game_path(os.path.abspath(self.config["wad"]))
@@ -143,7 +144,7 @@ class DoomTASEnv(Env):
         self.game.add_available_button(vzd.Button.USE)
         
         self.game.init()
-    
+        
     def _get_state(self) -> Dict[str, np.ndarray]:
         state = self.game.get_state()
         if state is None:
@@ -172,25 +173,51 @@ class DoomTASEnv(Env):
         ], dtype=np.float32)
         
         return {"screen": screen, "aux_data": aux_data}
-    
+        
     def _zero_observation(self) -> Dict[str, np.ndarray]:
         return {
             "screen": np.zeros((1, 120, 160), dtype=np.uint8),
             "aux_data": np.zeros(8, dtype=np.float32)
         }
-    
+        
     def _action_to_buttons(self, action: np.ndarray) -> list:
-        # Binary validation gate thresholds across available action buttons 
-        return [int(a > 0.5) for a in action[:8]]
-    
-    def _calculate_reward(self, curr_state: Dict, done: bool) -> float:
+        """
+        PURE CONVERTER: Converts raw network space values directly into binary actions.
+        No code-level overrides or keyboard-hijacking hooks remain. Model decides actions.
+        """
+        raw_actions = action[:8]
+        processed_buttons = []
+        
+        # Map standard thresholds natively
+        for i, a in enumerate(raw_actions):
+            if i in [4, 5]:  # TURN_LEFT, TURN_RIGHT
+                processed_buttons.append(1 if a > 0.20 else 0)
+            else:
+                processed_buttons.append(1 if a > 0.5 else 0)
+
+        # Basic filter: Prevents mutual cancellation error inputs from raw noise
+        if processed_buttons[4] == 1 and processed_buttons[5] == 1:
+            if raw_actions[4] > raw_actions[5]:
+                processed_buttons[5] = 0
+            else:
+                processed_buttons[4] = 0
+                
+        return processed_buttons
+        
+    def _calculate_reward(self, curr_state: Dict, processed_buttons: list, done: bool) -> float:
+        """
+        NUDGE ENGINE: Shapes choices entirely dynamically via rewards/penalties instead of coding restrictions.
+        """
+        if done:
+            return 0.0
+            
         reward = 0.0
         curr_aux = curr_state["aux_data"]
         
         pos_x, pos_y, vel_x, vel_y, _, health, dist_to_exit, _ = curr_aux
         prev_pos_x, prev_pos_y, prev_vel_x, prev_vel_y, _, prev_health, prev_dist, _ = self.prev_aux
         
-        # 1. Velocity Reward
+        # 1. Base Velocity Reward
         scalar_velocity = np.sqrt(vel_x**2 + vel_y**2)
         reward += 0.1 * min(scalar_velocity / 100.0, 1.0)
         
@@ -217,22 +244,41 @@ class DoomTASEnv(Env):
         # 6. Time Penalty
         reward -= 0.05
         
+        # --- MODEL ENVIRONMENT NUDGES ---
+        # NUDGE A: Stagnation Tax (If holding forward into objects/walls/doors, enforce negative reinforcement)
+        if processed_buttons[0] == 1 and scalar_velocity < 2.0:
+            reward -= 5.0
+            
+        # NUDGE B: Active Escape Payout (Massive dopamine reward for executing an action combo that breaks deadlocks)
+        if self.was_stuck and scalar_velocity > 5.0:
+            reward += 25.0
+            
+        # NUDGE C: Interactive Object Nudge (Provide a minor bonus for pressing USE when completely deadlocked)
+        if scalar_velocity < 2.0 and processed_buttons[7] == 1:
+            reward += 3.0
+            
+        # Cache environmental context flag for next framework step
+        self.was_stuck = (scalar_velocity < 2.0)
+        
         # 7. Terminal Win Condition Exit
         if done and not self.game.is_player_dead():
             reward += 1000.0
             
-        return float(np.clip(reward, -1.0, 10.0))
-    
+        return float(np.clip(reward, -10.0, 35.0))
+        
     def reset(self, seed=None, options=None) -> Tuple[Dict, dict]:
         super().reset(seed=seed)
         self.game.new_episode()
         self.step_count = 0
         
+        # CRITICAL: Structural baseline wipe to prevent memories of previous lives corrupting new ones
+        self.was_stuck = False
+        
         state = self._get_state()
         self.prev_aux = state["aux_data"].copy()
         
         return state, {}
-    
+        
     def step(self, action: np.ndarray) -> Tuple[Dict, float, bool, bool, dict]:
         buttons = self._action_to_buttons(action)
         
@@ -240,18 +286,13 @@ class DoomTASEnv(Env):
         self.game.make_action(buttons, self.frame_skip)
         
         # 1. IMMEDIATE TERMINATION CHECK
-        # Check if the episode ended or the player died right away
         done = self.game.is_episode_finished() or self.game.is_player_dead()
         
         # 2. SAFE STATE EXTRACTION
-        if done:
-            # If dead/finished, safely grab the final frame or use fallback
-            curr_state = self._get_state()
-        else:
-            curr_state = self._get_state()
+        curr_state = self._get_state()
             
-        # 3. REWARD CALCULATION
-        reward = self._calculate_reward(curr_state, done)
+        # 3. REWARD CALCULATION (Pass processed buttons into the nudge matrix)
+        reward = self._calculate_reward(curr_state, buttons, done)
         
         # Update trackers
         self.prev_aux = curr_state["aux_data"].copy()
@@ -285,7 +326,7 @@ class TASSBEvaluationCallback(BaseCallback):
         self.save_path = save_path
         self.best_time = float('inf')
         self.eval_count = 0
-    
+        
     def _on_step(self) -> bool:
         if self.num_timesteps % 10000 == 0 and self.num_timesteps > 0:
             self.eval_count += 1
@@ -322,7 +363,7 @@ class TASSBEvaluationCallback(BaseCallback):
 
 
 # ============================================================================
-# MAIN TRAINING SCRIPT
+# MAIN TRAINING SCRIPT WITH CONDITIONAL LOAD
 # ============================================================================
 
 def train_tas_agent():
@@ -333,29 +374,47 @@ def train_tas_agent():
         "frame_repeat": 4
     }
     
+    PRETRAINED_ZIP = "pre_trained_tas_model.zip"
+    
     print("Initializing TAS environment...")
     env = DoomTASEnv(config, render=True)
     
-    print("Creating PPO agent with custom feature extractor...")
-    model = PPO(
-        policy='MultiInputPolicy',
-        env=env,
-        learning_rate=3e-4,
-        n_steps=2048,
-        batch_size=64,
-        n_epochs=10,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_range=0.2,
-        ent_coef=0.01,
-        device='cuda' if torch.cuda.is_available() else 'cpu',
-        verbose=1,
-        policy_kwargs=dict(
-            features_extractor_class=TASFeatureExtractor,
-            features_extractor_kwargs=dict(features_dim=256),
-            net_arch=dict(pi=[256, 256], vf=[256, 256])  # FIX: Correct architectural map layout
+    # Check if your file exists in the directory
+    if os.path.exists(PRETRAINED_ZIP):
+        print(f"🧠 Found pre-trained weights file '{PRETRAINED_ZIP}'! Loading model...")
+        
+        # FIX: Remove env=env compilation parameter from load routine. 
+        # Restructures network shapes natively matching structural features of your zip archive.
+        model = PPO.load(PRETRAINED_ZIP, device='cuda' if torch.cuda.is_available() else 'cpu')
+        model.set_env(env)
+        
+        # Micro-learning rate so it retains what it learned from your file
+        model.learning_rate = 5e-5
+        
+        if hasattr(model.policy, "log_std"):
+            with torch.no_grad():
+                model.policy.log_std.fill_(-3.0)
+    else:
+        print("⚠️ Pre-trained model zip not found! Creating fresh PPO agent from scratch...")
+        model = PPO(
+            policy='MultiInputPolicy',
+            env=env,
+            learning_rate=3e-4,
+            n_steps=2048,
+            batch_size=64,
+            n_epochs=10,
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_range=0.2,
+            ent_coef=0.01,
+            device='cuda' if torch.cuda.is_available() else 'cpu',
+            verbose=1,
+            policy_kwargs=dict(
+                features_extractor_class=TASFeatureExtractor,
+                features_extractor_kwargs=dict(features_dim=256),
+                net_arch=dict(pi=[256, 256], vf=[256, 256])
+            )
         )
-    )
     
     eval_callback = TASSBEvaluationCallback(
         eval_env=env,
@@ -373,4 +432,3 @@ def train_tas_agent():
 
 if __name__ == "__main__":
     train_tas_agent()
-
