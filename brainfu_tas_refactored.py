@@ -359,17 +359,18 @@ class DoomTASEnv(Env):
 class TeacherForcingWrapper(Wrapper):
     def __init__(self, env, teacher_reward: float = 0.25):
         super().__init__(env)
-        self.teacher_reward =teacher_reward
+        self.teacher_reward = teacher_reward
         self.key_to_action = {
-            'w':	np.array([1,0,0,0,0,0,0,0] + [0]*10, dtype=np.float32), #foreward
+            'w':	np.array([1,0,0,0,0,0,0,0] + [0]*10, dtype=np.float32), #forward
             's':	np.array([0,1,0,0,0,0,0,0] + [0]*10, dtype=np.float32), #backward
             'a':	np.array([0,0,1,0,0,0,0,0] + [0]*10, dtype=np.float32), #leftward
             'd':	np.array([0,0,0,1,0,0,0,0] + [0]*10, dtype=np.float32), #rightward
-            'left':	np.array([0,0,0,0,1,0,0,0] + [0]*10, dtype=np.float32), #turnleftward
-            'right':np.array([0,0,0,0,0,1,0,0] + [0]*10, dtype=np.float32), #turnrightward
-            'space':np.array([0,0,0,0,0,0,1,0] + [0]*10, dtype=np.float32), #fireward
-            'e':	np.array([0,0,0,0,0,0,0,1] + [0]*10, dtype=np.float32), #useward
+            'left':	np.array([0,0,0,0,1,0,0,0] + [0]*10, dtype=np.float32), #turn left
+            'right':np.array([0,0,0,0,0,1,0,0] + [0]*10, dtype=np.float32), #turn right
+            'space':np.array([0,0,0,0,0,0,1,0] + [0]*10, dtype=np.float32), #attack
+            'e':	np.array([0,0,0,0,0,0,0,1] + [0]*10, dtype=np.float32), #use
         }
+    
     def step(self, action):
         teacher_override = False
         
@@ -378,6 +379,14 @@ class TeacherForcingWrapper(Wrapper):
                 action = teacher_action
                 teacher_override = True
                 break
+        
+        # Call the underlying environment's step function
+        obs, reward, done, truncated, info = self.env.step(action)
+        
+        # Optionally boost reward when teacher overrides (for encouraging learning from human input)
+        if teacher_override:
+            reward += self.teacher_reward
+        
         return obs, reward, done, truncated, info
 
 # ============================================================================
