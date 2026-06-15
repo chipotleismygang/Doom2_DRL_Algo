@@ -3,17 +3,17 @@ TAS-Level Machine Learning Model for Doom Speedrunning.
 
 This module implements an advanced Proximal Policy Optimization (PPO) agent
 trained to exploit speedrunning mechanics in Doom, including:
-- SR50 strafing and wall-running for maximum velocity
-- Rocket/Arch-Vile jump exploits for height gain
-- Thing-running techniques using enemy hitboxes
-- Optimized navigation with delta-distance rewards
+- SR50 strafing and wall-running for maximum velocity (its too stupid)
+- Rocket/Arch-Vile jump exploits for height gain (only has done the first level)
+- Thing-running techniques using enemy hitboxes (it just runs into them...)
+- Optimized navigation with delta-distance rewards (this one works! just distance from exit through a viable path)
 
 Architecture:
-- CNN processes visual input (160x120 grayscale frames)
-- Auxiliary input layers handle 8 game variables (position, velocity, angle, health, distance to exit)
-- PPO policy and value networks with multi-input processing
-- Custom Gym environment wrapping VizDoom with speedrun-specific rewards
-- Evaluation callback tracking "Time to Exit" as primary metric
+- CNN processes visual input (160x120 grayscale frames to make it easier on the cpu and faster) 
+- Auxiliary input layers handle several game variables (position, velocity, angle, health, distance to exit,etc)
+- PPO policy and value networks with multi-input processing with a wrapper allowing direct input from a human to train it
+- Custom Gym environment wrapping VizDoom with speedrun-specific rewards to make the special stuff like wall strafing work
+- Evaluation callback tracking "Time to Exit" as primary metric 
 """
 
 # Import essential libraries for the reinforcement learning pipeline
@@ -34,9 +34,11 @@ from stable_baselines3.common.torch_layers import BaseFeaturesExtractor  # Base 
 # ============================================================================
 # CUSTOM FEATURE EXTRACTOR: Multi-Input Processing (CNN + Auxiliary)
 # ============================================================================
-# WHY: We need to extract meaningful features from both visual data (game screenshots)
-# and numerical game state data (position, velocity, etc.). This is done via two
-# parallel neural networks that process different input types, then fused together.
+'''
+We need to extract meaningful features from both visual data (game screenshots)
+and numerical game state data (position, velocity, etc.). This is done with two
+parallel neural networks that process different input types, then fused together.
+'''
 
 class TASFeatureExtractor(BaseFeaturesExtractor):
     """
@@ -44,16 +46,16 @@ class TASFeatureExtractor(BaseFeaturesExtractor):
     
     This class takes two types of input:
     1. "screen" - A grayscale image of the game (1 channel, 120x160 pixels)
-    2. "aux_data" - 8 numerical values about the game state
+    2. "aux_data" - several numerical values about the game state
     
-    Both inputs are processed separately, then combined into a single feature vector
+    Both inputs are processed separately, then combined into a single value
     that the PPO agent uses to make decisions.
     """
     def __init__(self, observation_space: spaces.Dict, features_dim: int = 256):
         """
         Initialize the feature extractor.
         
-        Args:
+        Args(arguments):
             observation_space: Dict with "screen" (image) and "aux_data" (numbers)
             features_dim: Size of the final output feature vector (256 = 256 numbers)
         """
@@ -104,11 +106,11 @@ class TASFeatureExtractor(BaseFeaturesExtractor):
             # AdaptiveAvgPool2d: reduces any spatial dimensions to 4x4
             # This compresses 8x10 -> 4x4, and we have 64 channels: 64 * 4 * 4 = 1024 values
             nn.AdaptiveAvgPool2d((4, 4)),           # -> 64 x 4 x 4 = 1024 values total
-            # Flatten: converts 3D (64, 4, 4) into 1D vector of 1024 values
+            # Flatten: converts 3D (64, 4, 4) into 1D vector of 1024 values (i hate math)
             nn.Flatten()
         )
         
-        # Build the auxiliary network for processing game state numbers (8 values)
+        # Build the auxiliary network for processing game state numbers (8 values! ahhhhhhh! painful numbers remember it)
         self.aux_net = nn.Sequential(
             # Layer 1: 8 input values -> 64 hidden units
             nn.Linear(self.n_aux_features, 64),  # Takes 8 numbers, outputs 64
@@ -139,7 +141,7 @@ class TASFeatureExtractor(BaseFeaturesExtractor):
         Returns:
             A vector of size features_dim (256) representing the processed state
         """
-        # Extract screen image and normalize to 0-1 range (divide by 255)
+        # Extract screen image and normalize to 0-1 range (divide by 255. [thats 2 to the power of 8 and i remember that for no reason])
         # Images are typically 0-255, normalizing helps neural network training
         screen = observations["screen"].float() / 255.0
         
@@ -164,18 +166,22 @@ class TASFeatureExtractor(BaseFeaturesExtractor):
 # ============================================================================
 # CUSTOM GYM ENVIRONMENT: Doom with TAS-Level Reward Shaping
 # ============================================================================
-# WHY: We need to create a custom environment because VizDoom by itself doesn't
-# have the reward structure we want. We shape rewards to encourage speedrunning
-# exploits like strafe-jumping and rocket jumping, not just killing monsters.
+'''
+We need to create a custom environment because VizDoom by itself doesn't
+have the reward structure we want. We shape rewards to encourage speedrunning
+exploits like strafe-jumping and rocket jumping, not just killing monsters.
 
+P.S
+ITS USELESS AND HATES ME BECAUSE ITS DUMB AND WONT GO PAST THE FIRST LEVEL THERE IS NO ROCKET TO JUMP
+'''
 class DoomTASEnv(Env):
     """
     Custom Gym environment wrapping VizDoom with speedrun reward shaping.
     
-    This environment:
-    1. Runs Doom and gets game state (screenshots, position, velocity, etc.)
-    2. Takes AI actions (move forward, turn, attack, use)
-    3. Calculates rewards based on progress toward the exit (speedrun metric)
+    This environment:                                                                         
+    1. Runs Doom and gets game state (screenshots, position, velocity, etc.)                   ╭──────────────────────────────────────────────────────────────────╮
+    2. Takes AI actions (move forward, turn, attack, use)                      ヽ((◎д◎  ))ゝ <oh my god i had no idea! its as if its the description of the file!︳                
+    3. Calculates rewards based on progress toward the exit (speedrun metric)                  ╰──────────────────────────────────────────────────────────────────╯
     4. Returns observations for the AI to learn from
     """
     metadata = {"render_modes": []}  # Metadata required by Gym API
@@ -190,7 +196,7 @@ class DoomTASEnv(Env):
         """
         super().__init__()
         
-        # Create a Doom game instance - this is the actual game we'll run
+        # Create a Doom game instance - this is the actual game we'll run using something called Zdoom.
         self.game = vzd.DoomGame()
         
         # Store configuration for later use
@@ -199,14 +205,14 @@ class DoomTASEnv(Env):
         # Frame skip: how many game frames to simulate per action
         # If frame_repeat=1, each action advances 1 frame
         # If frame_repeat=4, each action advances 4 frames (faster training)
-        self.frame_skip = self.config.get("frame_repeat", 1)
+        self.frame_skip = self.config.get("frame_repeat", 4)
         
         # Initialize Doom with the configuration
         self._init_doom(render)
         
         # Define the action space: continuous values from 0 to 1
         # We have 18 possible actions (buttons the agent can press)
-        # Action vector: [forward, backward, left, right, turn_left, turn_right, attack, use, + 10 unused]
+        # Action vector: [forward, backward, left, right, turn_left, turn_right, attack, use, + 10 unused just in case]
         self.action_space = spaces.Box(low=0, high=1, shape=(18,), dtype=np.float32)
         
         # Define the observation space: what the agent sees
@@ -710,7 +716,7 @@ class TeacherForcingWrapper(Wrapper):
     and the AI learns from it. When human input overrides the AI, we add a small
     reward bonus to encourage the AI to learn from the human's actions.
     """
-    def __init__(self, env, teacher_reward: float = 0.25):
+    def __init__(self, env, teacher_reward: float = 10):
         """
         Initialize the wrapper.
         
@@ -998,11 +1004,11 @@ def train_tas_agent():
             
             # Discount factor: how much to value future rewards
             # 0.99 = high value for future, 0.95 = some uncertainty
-            gamma=0.99,
+            gamma=0.95,
             
             # GAE lambda: smoothness of advantage calculation
             # Higher = smoother but biased, lower = higher variance
-            gae_lambda=0.95,
+            gae_lambda=0.90,
             
             # PPO clipping range: how much policy can change per update
             # 0.2 = max 20% change, prevents destabilizing updates
@@ -1010,7 +1016,7 @@ def train_tas_agent():
             
             # Entropy coefficient: encourages exploration
             # Higher = more random exploration, lower = more greedy
-            ent_coef=0.01,
+            ent_coef=0.05,
             
             # Use GPU if available for faster training
             device='cuda' if torch.cuda.is_available() else 'cpu',
@@ -1042,7 +1048,7 @@ def train_tas_agent():
         # Train the model for 2 million timesteps
         # This is equivalent to 2 million actions taken in the environment
         model.learn(
-            total_timesteps=2_000_000,
+            total_timesteps=200_000,
             callback=eval_callback,
             progress_bar=True
         )
